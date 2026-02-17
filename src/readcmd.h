@@ -17,7 +17,10 @@ struct cmdline {
 	char *in;	/* If not null : name of file for input redirection. */
 	char *out;	/* If not null : name of file for output redirection. */
 	char ***seq;	/* See comment below */
+	int background;
 };
+
+
 
 /* Field seq of struct cmdline :
 A command line is a sequence of commands whose output is linked to the input
