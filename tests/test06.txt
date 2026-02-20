@@ -1,0 +1,6 @@
+#
+# test06_.txt - Tester la redirection entrante
+#
+echo in.txt contient :
+chmod a+rxw in.txt
+cat < in.txt 

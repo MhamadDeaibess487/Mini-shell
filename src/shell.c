@@ -10,21 +10,36 @@
 
 
 void handler_signal(int sig){
-	if (sig == SIGCHLD) {
-        int status;
-        while (waitpid(-1, &status, WNOHANG) > 0);
-    }
+	switch (sig) {
+		case SIGINT:
+			printf("caught sigint, exiting\n");
+			exit(0);
+			break;
+		case SIGCHLD:
+			int status;
+			while (waitpid(-1, &status, WNOHANG) > 0);
+			break;
+		case SIGTSTP:
+			printf("caught sigstop, exiting\n");
+			exit(0);
+			break;
+		default:
+			break;
+	}
+	
 	
 }
 
 int main()
 {
-	Signal(SIGCHLD, handler_signal);
+	Signal(SIGCHLD, handler_signal);//pour eviter les processus zombies
+	Signal(SIGINT, handler_signal);//pour pouvoir sortir du shell avec le signal SIGINT (ctrl+c)
+	Signal(SIGTSTP, handler_signal);//pour pouvoir sortir du shell avec le signal SIGSTOP (ctrl+z)
 	while (1) {
 		struct cmdline *l;
-		int i, j;
+		//int i, j;
 
-		printf("shell> ");
+		//printf("shell> ");
 		l = readcmd();
 		
 
@@ -50,7 +65,7 @@ int main()
 		/* Display each command of the pipe */
 	
 		
-		for (i=0; l->seq[i]!=0; i++) {
+		/*for (i=0; l->seq[i]!=0; i++) {
 			char **cmd = l->seq[i];
 			printf("seq[%d]: ", i);
 			
@@ -59,7 +74,7 @@ int main()
 				
 
 			}
-		}
+		}*/
 	
 		
 		
@@ -76,15 +91,12 @@ int main()
 				}
 				//on verifie le quit dans la sequence de commande pour sortir du shell
 				if(strcmp(l->seq[i][0], "quit") == 0){
-					printf("caught sigint, exiting\n");
-					exit(0);
+					kill(getpid(), SIGINT);
 				}
 					//on cree un processus fils pour chaque commande de la sequence
 					pid_t pid1 = Fork();
 					if(pid1 == 0){
-						//si c'est la premier commande de la sequence et qu'il y a une commande suivante
-						if(prev_fd == -1 && l->seq[i+1] != NULL){
-							//on traite les permission de fichier d'entrée
+						//on traite les permission de fichier d'entrée
 							if(l->in!=NULL){
 							int fd0 = open(l->in, O_RDONLY, 0);
 							if(fd0 < 0){
@@ -95,6 +107,9 @@ int main()
 								Close(fd0);
 								
 							}
+						//si c'est la premier commande de la sequence et qu'il y a une commande suivante
+						if(prev_fd == -1 && l->seq[i+1] != NULL){
+							
 							//on ecrit dans fd[1] du tube pour la prochaine commande
 							Dup2(fd[1],1);
 							Close(fd[0]);
@@ -134,6 +149,7 @@ int main()
 						fprintf(stderr, "%s: command not found\n", l->seq[i][0]);
 						exit(1);
 				}else{
+					
 					//dans le pere 
 					if (l->seq[i+1] != NULL) {
 
@@ -148,24 +164,14 @@ int main()
 				
 
 			}
-			//si la commande doit être exécutée en arrière-plan, on attend pas la fin du processus fils
-			if(l->background){
-				for(int i=0;l->seq[i]!=NULL;i++){
-					wait(NULL);
-				}
-			}else {
-				//pour void quand on n'attend pas la fin du processus fils
-				printf("Processus en arrière-plan %d\n",getpid());
-				printf("le pere : %d\n",getppid());
-				
+			//pour bien gere les ordre dans le forground
+			if (!l->background) {
+				int status;
+				for (int k = 0; l->seq[k] != NULL; k++)
+					wait(&status);
 			}
 			
 			
-			
-			
-		
 	
-
-		
 	}
 }

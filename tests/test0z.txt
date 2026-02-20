@@ -1,0 +1,9 @@
+#
+# test_background.txt
+#
+
+sleep 1 &
+sleep 1 &
+sleep 1 &
+ls
+WAIT
