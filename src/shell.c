@@ -8,21 +8,160 @@
 #include "csapp.h"
 #include <string.h>
 
+struct tab_jobs_t tab_jobs;
+
+
+void afficher_tab_jobs(struct tab_jobs_t *tab_jobs){
+	printf("Tableau des jobs :\n");
+	for (int i = 0; i < MAXJOBS; i++) {
+		if (tab_jobs->tab[i].numero_job != 0) {
+			printf("[%d]: PID=%d",tab_jobs->tab[i].numero_job,tab_jobs->tab[i].pid);
+			switch (tab_jobs->tab[i].status) {
+				case FG:
+					printf(" (Foreground)");
+					break;
+				case BG:
+					printf(" (Background)");
+					break;
+				case STOPPED:
+					printf(" (Stopped)");
+					break;
+				case ZOMBIE:
+					printf(" (Zombie)");
+					break;
+				case TERMINATED:
+					printf(" (Terminated)");
+					break;
+				case UNUSED:
+					printf(" (Unused)");
+					break;
+				case Done:
+					printf(" (Done)");
+					break;
+				case RUNNING:
+					printf(" (Running)");
+					break;
+				default:
+					printf(" (Unknown status)");
+					break;
+			
+				
+		}
+		printf(": %s\n", tab_jobs->tab[i].cmd);
+		
+	}
+	
+}
+}
+
+int trouver_index(struct tab_jobs_t *tab_jobs, pid_t pid){
+	for(int i=0;i<MAXJOBS;i++){
+		if(tab_jobs->tab[i].pid == pid){
+			return i;
+		}
+	}
+	return -1;
+}
+
+void init_tab_jobs(struct tab_jobs_t *tab_jobs){
+	tab_jobs->nb_jobs = 0;
+	for(int i=0;i<MAXJOBS;i++){
+		tab_jobs->tab[i].pid = 0;
+		tab_jobs->tab[i].numero_job = 0;
+		tab_jobs->tab[i].status = UNUSED;
+		tab_jobs->tab[i].cmd = NULL;	
+	}
+}
+
+
+int premierecase(struct tab_jobs_t *tab_jobs){
+	for(int i=0;i<MAXJOBS;i++){
+		if(tab_jobs->tab[i].numero_job == 0 && tab_jobs->tab[i].status == UNUSED){
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+int job_premier_plan(struct tab_jobs_t *tab_jobs){
+	for(int i=0;i<MAXJOBS;i++){
+		if(tab_jobs->tab[i].status == FG){
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+
+
+void jobs(struct tab_jobs_t *tab_jobs){
+	afficher_tab_jobs(tab_jobs);
+}
+
+int ajouter_job(struct tab_jobs_t *tab_jobs,int index, pid_t pid, char *cmd, int status){
+		
+	tab_jobs->tab[index].pid = pid;
+	tab_jobs->tab[index].numero_job = index + 1;
+	tab_jobs->tab[index].status = status;
+	tab_jobs->tab[index].cmd = malloc(strlen(cmd) + 1);
+	strcpy(tab_jobs->tab[index].cmd, cmd);
+	tab_jobs->nb_jobs++;
+	return index;
+
+}
+	
+void supprimer_jobs(struct tab_jobs_t *tab_jobs, int index){
+	tab_jobs->tab[index].pid = 0;
+	tab_jobs->tab[index].numero_job = 0;
+	tab_jobs->tab[index].status = UNUSED;
+	free(tab_jobs->tab[index].cmd);
+	tab_jobs->tab[index].cmd = NULL;
+	tab_jobs->nb_jobs--;
+}
+
+void fg(struct tab_jobs_t *tab_jobs, int index){
+	tab_jobs->tab[index].status = FG;
+	kill(tab_jobs->tab[index].pid, SIGCONT);
+}
+
+void bg(struct tab_jobs_t *tab_jobs, int index){
+	tab_jobs->tab[index].status = BG;
+	kill(tab_jobs->tab[index].pid, SIGCONT);
+	
+
+}
 
 void handler_signal(int sig){
 	switch (sig) {
-		case SIGINT:
-			printf("caught sigint, exiting\n");
-			exit(0);
+		case SIGINT: {
+			int idx = job_premier_plan(&tab_jobs);
+			if (idx >= 0){
+				kill(tab_jobs.tab[idx].pid, SIGINT);
+				tab_jobs.tab[idx].status = TERMINATED;
+			}
 			break;
+		}
 		case SIGCHLD:
 			int status;
-			while (waitpid(-1, &status, WNOHANG) > 0);
+			pid_t pid;
+			while ((pid=waitpid(-1, &status, WNOHANG)) > 0){
+				//indice = trouver pid dans le tableau des jobs
+				int index_job = trouver_index(&tab_jobs, pid);
+				if(index_job >= 0){
+				supprimer_jobs(&tab_jobs, index_job);
+				}
+			}
 			break;
-		case SIGTSTP:
-			printf("caught sigstop, exiting\n");
-			exit(0);
+		case SIGTSTP: {
+			int idx = job_premier_plan(&tab_jobs);
+			if (idx >= 0) {
+				kill(tab_jobs.tab[idx].pid, SIGTSTP);
+				tab_jobs.tab[idx].status = STOPPED;
+			}
 			break;
+		}
 		default:
 			break;
 	}
@@ -30,16 +169,23 @@ void handler_signal(int sig){
 	
 }
 
+
+
 int main()
 {
 	Signal(SIGCHLD, handler_signal);//pour eviter les processus zombies
 	Signal(SIGINT, handler_signal);//pour pouvoir sortir du shell avec le signal SIGINT (ctrl+c)
-	Signal(SIGTSTP, handler_signal);//pour pouvoir sortir du shell avec le signal SIGSTOP (ctrl+z)
+	Signal(SIGTSTP, handler_signal);//pour pouvoir stopper un processus avec le signal SIGTSTP (ctrl+z)
+	
+	
+	
+	init_tab_jobs(&tab_jobs);
+	int stat=0;
 	while (1) {
 		struct cmdline *l;
 		//int i, j;
 
-		//printf("shell> ");
+		printf("shell> ");
 		l = readcmd();
 		
 
@@ -91,7 +237,51 @@ int main()
 				}
 				//on verifie le quit dans la sequence de commande pour sortir du shell
 				if(strcmp(l->seq[i][0], "quit") == 0){
-					kill(getpid(), SIGINT);
+					printf("exit\n");
+					exit(0);
+				}
+				if(strcmp(l->seq[i][0], "jobs") == 0){
+					//affichage des jobs
+					jobs(&tab_jobs);
+					continue;
+				}
+				if(strcmp(l->seq[i][0], "fg") == 0){
+					//mettre le job en premier plan
+					int numero = atoi(l->seq[i][1]) - 1;
+					fg(&tab_jobs, numero);
+					l->background = 0;
+					continue;
+				}
+				if(strcmp(l->seq[i][0], "bg") == 0){
+					//mettre le job en arrière plan
+					int numero = atoi(l->seq[i][1]) - 1;
+					if(!numero){
+						numero = job_premier_plan(&tab_jobs);
+					}
+
+					bg(&tab_jobs,numero); 
+					l->background = 1; 
+					continue;
+				}
+				if(strcmp(l->seq[i][0], "kill") == 0){
+					int numero = atoi(l->seq[i][1]) - 1;
+					if (numero ==1){
+						printf("kill: job not permitted\n");
+					};
+				}
+				if (strcmp(l->seq[i][0], "cd") == 0) {
+
+					if (l->seq[i][1] == NULL) {
+						/* cd sans argument → aller dans HOME */
+						char *home = getenv("HOME");
+						if (home != NULL)
+							chdir(home);
+					} else {
+						if (chdir(l->seq[i][1]) < 0)
+							perror("cd");
+					}
+
+					continue;
 				}
 					//on cree un processus fils pour chaque commande de la sequence
 					pid_t pid1 = Fork();
@@ -146,6 +336,13 @@ int main()
 
 						//on execute la commande
 						execvp(l->seq[i][0], l->seq[i]);
+						if(l->background){
+							stat = BG;
+						}else{
+							stat = FG;
+						}
+						
+
 						fprintf(stderr, "%s: command not found\n", l->seq[i][0]);
 						exit(1);
 				}else{
@@ -159,6 +356,17 @@ int main()
 						close(fd[1]);      // on ferme l’écriture côté parent
 						prev_fd = fd[0];   // on garde lecture pour prochaine commande
 					}
+
+
+					sigset_t mask, prev;
+					Sigemptyset(&mask);
+					Sigaddset(&mask, SIGCHLD);
+					Sigprocmask(SIG_BLOCK, &mask, &prev);
+
+					//on ajoute le job dans le tableau des jobs
+					ajouter_job(&tab_jobs, premierecase(&tab_jobs), pid1, l->seq[i][0], stat);
+
+					Sigprocmask(SIG_SETMASK, &prev, NULL);
 				}
 				
 				
