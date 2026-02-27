@@ -1,0 +1,5 @@
+#
+# test09_.txt - Tester le comportement de l'arrière plan
+#
+sleep 5 &
+cat in.txt 

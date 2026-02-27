@@ -1,0 +1,6 @@
+#
+# test05_.txt - Tester la redirection sortante
+#
+chmod a+rxw out.txt
+ls > out.txt
+cat out.txt

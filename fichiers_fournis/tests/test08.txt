@@ -1,0 +1,10 @@
+#
+# test08.txt - Tester sequences de commandes
+#
+ls |wc
+ls | grep .c | wc
+cat < in.txt | grep c'est | wc > out.txt 
+cat out.txt
+cat Makefile | quit | wc
+ls
+

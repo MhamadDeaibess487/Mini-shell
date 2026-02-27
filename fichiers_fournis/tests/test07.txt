@@ -1,0 +1,14 @@
+#
+# test07.txt - permission entre et sortie
+#
+
+echo > out.txt
+chmod a-rxw out.txt
+ls -l
+ls > out.txt
+chmod a+rwx out.txt 
+cat out.txt 
+chmod a-rxw in.txt
+ls -l
+cat < in.txt 
+chmod a+rxw in.txt
