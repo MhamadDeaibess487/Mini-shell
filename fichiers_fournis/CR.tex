@@ -1,0 +1,165 @@
+\documentclass[a4paper,12pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\title{\textbf{TP n°5 : Réalisation d’un Mini-Shell Unix}}
+\author{Imed Eddine DJEGHRI et Mhamad Deaibess \\ L3 Informatique \\ Université Grenoble Alpes \\ 2025/2026}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+L’objectif de ce TP était de concevoir un mini-shell Unix en langage C.  
+Un shell est un interpréteur de commandes permettant l’exécution de programmes via des appels système.
+
+Ce projet visait à mettre en pratique les notions suivantes :
+
+\begin{itemize}
+    \item Création et gestion des processus
+    \item Redirections d’entrée et de sortie
+    \item Communication entre processus (pipes)
+    \item Gestion des signaux
+    \item Prévention des processus zombies
+\end{itemize}
+
+\section{Analyse de la structure \texttt{cmdline}}
+
+La fonction \texttt{readcmd()} analyse la ligne saisie par l’utilisateur et retourne une structure contenant :
+
+\begin{itemize}
+    \item \texttt{err} : message d’erreur syntaxique
+    \item \texttt{in} : fichier pour redirection d’entrée
+    \item \texttt{out} : fichier pour redirection de sortie
+    \item \texttt{seq} : tableau de commandes (gestion des pipes)
+    \item \texttt{background} : exécution en arrière-plan
+\end{itemize}
+
+La compréhension de cette structure a été essentielle pour organiser l’exécution des commandes.
+
+\section{Exécution des commandes}
+
+\subsection{Commandes simples}
+
+Le mécanisme utilisé repose sur le schéma classique Unix :
+
+\begin{enumerate}
+    \item Création d’un processus fils avec \texttt{fork()}
+    \item Exécution avec \texttt{execvp()}
+    \item Attente dans le père avec \texttt{wait()}
+\end{enumerate}
+
+\begin{lstlisting}[language=C]
+pid_t pid = fork();
+if(pid == 0){
+    execvp(l->seq[i][0], l->seq[i]);
+    perror("exec");
+    exit(1);
+}
+\end{lstlisting}
+
+\subsection{Commande intégrée quit}
+
+La commande \texttt{quit} permet d’arrêter le shell :
+
+\begin{lstlisting}[language=C]
+if(strcmp(l->seq[i][0], "quit") == 0){
+    exit(0);
+}
+\end{lstlisting}
+
+\section{Redirections}
+
+Les redirections ont été implémentées à l’aide des appels système \texttt{open()} et \texttt{dup2()}.
+
+Exemple pour la redirection de sortie :
+
+\begin{lstlisting}[language=C]
+int fd = open(l->out, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+dup2(fd, STDOUT_FILENO);
+close(fd);
+\end{lstlisting}
+
+Cela permet de remplacer le flux standard par un fichier.
+
+\section{Gestion des pipes}
+
+Les pipes permettent de relier la sortie d’une commande à l’entrée de la suivante.
+
+Principe :
+
+\begin{itemize}
+    \item Création d’un tube avec \texttt{pipe()}
+    \item Duplication des descripteurs avec \texttt{dup2()}
+    \item Fermeture des extrémités inutiles
+\end{itemize}
+
+Une variable \texttt{prev\_fd} conserve l’extrémité lecture du pipe précédent.
+
+Organisation :
+
+\begin{itemize}
+    \item Première commande : écrit dans le pipe
+    \item Commande intermédiaire : lit du précédent pipe et écrit dans le suivant
+    \item Dernière commande : lit du pipe précédent
+\end{itemize}
+
+Une attention particulière a été portée à la fermeture des descripteurs pour éviter les blocages.
+
+\section{Gestion des processus zombies}
+
+Afin d’éviter l’accumulation de processus zombies, un gestionnaire de signal \texttt{SIGCHLD} a été implémenté :
+
+\begin{lstlisting}[language=C]
+void handler(int sig){
+    int status;
+    while(waitpid(-1, &status, WNOHANG) > 0);
+}
+\end{lstlisting}
+
+Ce mécanisme permet de récupérer automatiquement les processus terminés.
+
+La commande \texttt{ps} a été utilisée pour vérifier l’absence de processus \texttt{<defunct>}.
+
+\section{Mode arrière-plan}
+
+Lorsque la commande se termine par \texttt{\&}, le champ \texttt{background} est activé.
+
+Principe :
+
+\begin{itemize}
+    \item Premier plan : le père attend la fin du fils
+    \item Arrière-plan : le père n’attend pas
+\end{itemize}
+
+L’implémentation actuelle nécessite encore un ajustement pour correspondre exactement au comportement standard d’un shell Unix.
+
+\section{Difficultés rencontrées}
+
+Les principales difficultés ont été :
+
+\begin{itemize}
+    \item Compréhension du fonctionnement des pipes multiples
+    \item Gestion correcte des descripteurs
+    \item Prévention des blocages
+    \item Gestion des signaux
+    \item Vérification de l’absence de zombies
+\end{itemize}
+
+\section{Conclusion}
+
+Ce TP a permis de comprendre concrètement le fonctionnement interne d’un shell Unix.  
+La gestion des processus, des pipes et des signaux constitue le cœur de ce type de programme.
+
+Les fonctionnalités avancées telles que la gestion complète des jobs et l’expansion des variables seront ajoutées dans une étape ultérieure.
+
+\end{document}
