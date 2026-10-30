@@ -45,11 +45,6 @@ static char *readline(void)
 		free(buf);
 		return NULL;
 	}
-	
-	if (feof(stdin)) { /* End of file (ctrl-d) */
-	    fflush(stdout);
-	    exit(0);
-	}
 
 	do {
 		size_t l = strlen(buf);
@@ -92,7 +87,8 @@ static char **split_in_words(char *line)
 			cur++;
 			break;
 		case '|':
-			w = "|";
+		case '&':
+			w = (c == '|') ? "|" : "&";
 			cur++;
 			break;
 		default:
@@ -107,6 +103,7 @@ static char **split_in_words(char *line)
 				case '<':
 				case '>':
 				case '|':
+				case '&':
 					c = 0;
 					break;
 				default: ;
@@ -200,7 +197,8 @@ struct cmdline *readcmd(void)
 				s->err = "only one input file supported";
 				goto error;
 			}
-			if (words[i] == 0) {
+			if (words[i] == 0 || (words[i][1] == 0 &&
+			    strchr("<>|&", words[i][0]) != NULL)) {
 				s->err = "filename missing for input redirection";
 				goto error;
 			}
@@ -212,7 +210,8 @@ struct cmdline *readcmd(void)
 				s->err = "only one output file supported";
 				goto error;
 			}
-			if (words[i] == 0) {
+			if (words[i] == 0 || (words[i][1] == 0 &&
+			    strchr("<>|&", words[i][0]) != NULL)) {
 				s->err = "filename missing for output redirection";
 				goto error;
 			}
@@ -234,6 +233,10 @@ struct cmdline *readcmd(void)
 			cmd_len = 0;
 			break;
 		case '&':
+			if (words[i] != NULL || cmd_len == 0) {
+				s->err = "misplaced background marker";
+				goto error;
+			}
 			s->background = 1;
 			break;
 		default:
@@ -262,6 +265,7 @@ error:
 		case '<':
 		case '>':
 		case '|':
+		case '&':
 			break;
 		default:
 			free(w);
@@ -281,3 +285,4 @@ error:
 	}
 	return s;
 }
+

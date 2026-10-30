@@ -1,385 +1,351 @@
 /*
  * Copyright (C) 2002, Simon Nieuviarts
+ * Job control: one process group per command line, including pipelines.
  */
-
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "readcmd.h"
-#include "csapp.h"
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include "readcmd.h"
 
-struct tab_jobs_t tab_jobs;
+struct process {
+    pid_t pid;
+    volatile sig_atomic_t done, stopped;
+};
+struct job {
+    pid_t pgid;
+    size_t count;
+    struct process *processes;
+    char *command;
+    struct termios modes;
+    int has_modes;
+};
+#define MAXJOBS 15
+static struct job job_table[MAXJOBS];
+static volatile sig_atomic_t foreground_group;
+static sigset_t child_mask;
+static int interactive;
+static pid_t shell_group;
+static struct termios shell_modes;
 
-
-void afficher_tab_jobs(struct tab_jobs_t *tab_jobs){
-	printf("Tableau des jobs :\n");
-	for (int i = 0; i < MAXJOBS; i++) {
-		if (tab_jobs->tab[i].numero_job != 0) {
-			printf("[%d]: PID=%d",tab_jobs->tab[i].numero_job,tab_jobs->tab[i].pid);
-			switch (tab_jobs->tab[i].status) {
-				case FG:
-					printf(" (Foreground)");
-					break;
-				case BG:
-					printf(" (Background)");
-					break;
-				case STOPPED:
-					printf(" (Stopped)");
-					break;
-				case ZOMBIE:
-					printf(" (Zombie)");
-					break;
-				case TERMINATED:
-					printf(" (Terminated)");
-					break;
-				case UNUSED:
-					printf(" (Unused)");
-					break;
-				case Done:
-					printf(" (Done)");
-					break;
-				case RUNNING:
-					printf(" (Running)");
-					break;
-				default:
-					printf(" (Unknown status)");
-					break;
-			
-				
-		}
-		printf(": %s\n", tab_jobs->tab[i].cmd);
-		
-	}
-	
-}
-}
-
-int trouver_index(struct tab_jobs_t *tab_jobs, pid_t pid){
-	for(int i=0;i<MAXJOBS;i++){
-		if(tab_jobs->tab[i].pid == pid){
-			return i;
-		}
-	}
-	return -1;
-}
-
-void init_tab_jobs(struct tab_jobs_t *tab_jobs){
-	tab_jobs->nb_jobs = 0;
-	for(int i=0;i<MAXJOBS;i++){
-		tab_jobs->tab[i].pid = 0;
-		tab_jobs->tab[i].numero_job = 0;
-		tab_jobs->tab[i].status = UNUSED;
-		tab_jobs->tab[i].cmd = NULL;	
-	}
-}
-
-
-int premierecase(struct tab_jobs_t *tab_jobs){
-	for(int i=0;i<MAXJOBS;i++){
-		if(tab_jobs->tab[i].numero_job == 0 && tab_jobs->tab[i].status == UNUSED){
-			return i;
-		}
-	}
-	return -1;
-}
-
-
-int job_premier_plan(struct tab_jobs_t *tab_jobs){
-	for(int i=0;i<MAXJOBS;i++){
-		if(tab_jobs->tab[i].status == FG){
-			return i;
-		}
-	}
-	return -1;
-}
-
-
-
-
-void jobs(struct tab_jobs_t *tab_jobs){
-	afficher_tab_jobs(tab_jobs);
-}
-
-int ajouter_job(struct tab_jobs_t *tab_jobs,int index, pid_t pid, char *cmd, int status){
-		
-	tab_jobs->tab[index].pid = pid;
-	tab_jobs->tab[index].numero_job = index + 1;
-	tab_jobs->tab[index].status = status;
-	tab_jobs->tab[index].cmd = malloc(strlen(cmd) + 1);
-	strcpy(tab_jobs->tab[index].cmd, cmd);
-	tab_jobs->nb_jobs++;
-	return index;
-
-}
-	
-void supprimer_jobs(struct tab_jobs_t *tab_jobs, int index){
-	tab_jobs->tab[index].pid = 0;
-	tab_jobs->tab[index].numero_job = 0;
-	tab_jobs->tab[index].status = UNUSED;
-	free(tab_jobs->tab[index].cmd);
-	tab_jobs->tab[index].cmd = NULL;
-	tab_jobs->nb_jobs--;
-}
-
-void fg(struct tab_jobs_t *tab_jobs, int index){
-	tab_jobs->tab[index].status = FG;
-	kill(tab_jobs->tab[index].pid, SIGCONT);
-}
-
-void bg(struct tab_jobs_t *tab_jobs, int index){
-	tab_jobs->tab[index].status = BG;
-	kill(tab_jobs->tab[index].pid, SIGCONT);
-	
-
-}
-
-void handler_signal(int sig){
-	switch (sig) {
-		case SIGINT: {
-			int idx = job_premier_plan(&tab_jobs);
-			if (idx >= 0){
-				kill(tab_jobs.tab[idx].pid, SIGINT);
-				tab_jobs.tab[idx].status = TERMINATED;
-			}
-			break;
-		}
-		case SIGCHLD:
-			int status;
-			pid_t pid;
-			while ((pid=waitpid(-1, &status, WNOHANG)) > 0){
-				//indice = trouver pid dans le tableau des jobs
-				int index_job = trouver_index(&tab_jobs, pid);
-				if(index_job >= 0){
-				supprimer_jobs(&tab_jobs, index_job);
-				}
-			}
-			break;
-		case SIGTSTP: {
-			int idx = job_premier_plan(&tab_jobs);
-			if (idx >= 0) {
-				kill(tab_jobs.tab[idx].pid, SIGTSTP);
-				tab_jobs.tab[idx].status = STOPPED;
-			}
-			break;
-		}
-		default:
-			break;
-	}
-	
-	
-}
-
-
-
-int main()
+/* No allocation, stdio or free in a signal handler. Table mutations in the
+ * main loop happen with SIGCHLD blocked, including allocation and release. */
+static void child_changed(int sig)
 {
-	Signal(SIGCHLD, handler_signal);//pour eviter les processus zombies
-	Signal(SIGINT, handler_signal);//pour pouvoir sortir du shell avec le signal SIGINT (ctrl+c)
-	Signal(SIGTSTP, handler_signal);//pour pouvoir stopper un processus avec le signal SIGTSTP (ctrl+z)
-	
-	
-	
-	init_tab_jobs(&tab_jobs);
-	int stat=0;
-	while (1) {
-		struct cmdline *l;
-		//int i, j;
+    int saved_errno = errno, status;
+    pid_t pid;
+    (void)sig;
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
+        for (int j = 0; j < MAXJOBS; j++) {
+            for (size_t p = 0; p < job_table[j].count; p++) {
+                struct process *proc = &job_table[j].processes[p];
+                if (proc->pid != pid) continue;
+                if (WIFEXITED(status) || WIFSIGNALED(status)) proc->done = 1;
+                else proc->stopped = WIFSTOPPED(status);
+            }
+        }
+    }
+    errno = saved_errno;
+}
 
-		printf("shell> ");
-		l = readcmd();
-		
+static void forward_signal(int sig)
+{
+    int saved_errno = errno;
+    if (foreground_group > 0) kill(-(pid_t)foreground_group, sig);
+    errno = saved_errno;
+}
 
-		/* If input stream closed, normal termination */
-		if (!l) {
-			printf("exit\n");
-			exit(0);
-		}
-		if (l->seq == NULL || l->seq[0] == NULL){
-    	continue;
-		}
+static void install_handler(int sig, void (*handler)(int))
+{
+    struct sigaction action = {0};
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    if (sigaction(sig, &action, NULL) < 0) { perror("sigaction"); exit(1); }
+}
 
+static int finished(const struct job *job)
+{
+    for (size_t p = 0; p < job->count; p++)
+        if (!job->processes[p].done) return 0;
+    return 1;
+}
 
-		if (l->err) {
-			/* Syntax error, read another command */
-			printf("error: %s\n", l->err);
-			continue;
-		}
+static int stopped(const struct job *job)
+{
+    int live = 0;
+    for (size_t p = 0; p < job->count; p++) {
+        if (job->processes[p].done) continue;
+        live = 1;
+        if (!job->processes[p].stopped) return 0;
+    }
+    return live;
+}
 
-		if (l->in) printf("in: %s\n", l->in);
-		if (l->out) printf("out: %s\n", l->out);
-		
-		/* Display each command of the pipe */
-	
-		
-		/*for (i=0; l->seq[i]!=0; i++) {
-			char **cmd = l->seq[i];
-			printf("seq[%d]: ", i);
-			
-			for (j=0; cmd[j]!=0; j++) {
-				printf("%s \n", cmd[j]);
-				
+static void discard_job(struct job *job)
+{
+    free(job->processes);
+    free(job->command);
+    memset(job, 0, sizeof(*job));
+}
 
-			}
-		}*/
-	
-		
-		
-		
-			int prev_fd=-1;
-			//on traite la sequence de commande
-			for(int i=0;l->seq[i]!=NULL;i++){
-				int fd[2];
-				if (l->seq[i+1] != NULL) {
-					if (pipe(fd) < 0) {
-						perror("pipe");
-						exit(1);
-					}
-				}
-				//on verifie le quit dans la sequence de commande pour sortir du shell
-				if(strcmp(l->seq[i][0], "quit") == 0){
-					printf("exit\n");
-					exit(0);
-				}
-				if(strcmp(l->seq[i][0], "jobs") == 0){
-					//affichage des jobs
-					jobs(&tab_jobs);
-					continue;
-				}
-				if(strcmp(l->seq[i][0], "fg") == 0){
-					//mettre le job en premier plan
-					int numero = atoi(l->seq[i][1]) - 1;
-					fg(&tab_jobs, numero);
-					l->background = 0;
-					continue;
-				}
-				if(strcmp(l->seq[i][0], "bg") == 0){
-					//mettre le job en arrière plan
-					int numero = atoi(l->seq[i][1]) - 1;
-					if(!numero){
-						numero = job_premier_plan(&tab_jobs);
-					}
+static void reap_jobs(void)
+{
+    child_changed(SIGCHLD);
+    for (int j = 0; j < MAXJOBS; j++)
+        if (job_table[j].pgid && finished(&job_table[j])) discard_job(&job_table[j]);
+}
 
-					bg(&tab_jobs,numero); 
-					l->background = 1; 
-					continue;
-				}
-				if(strcmp(l->seq[i][0], "kill") == 0){
-					int numero = atoi(l->seq[i][1]) - 1;
-					if (numero ==1){
-						printf("kill: job not permitted\n");
-					};
-				}
-				if (strcmp(l->seq[i][0], "cd") == 0) {
+/* SIGCHLD is blocked on entry; sigsuspend atomically unblocks it while waiting. */
+static void wait_foreground(struct job *job, const sigset_t *previous)
+{
+    sigset_t waiting = *previous;
+    sigdelset(&waiting, SIGCHLD);
+    while (!finished(job) && !stopped(job)) sigsuspend(&waiting);
+    if (interactive) {
+        if (tcsetpgrp(STDIN_FILENO, shell_group) < 0) perror("tcsetpgrp");
+        if (stopped(job) && tcgetattr(STDIN_FILENO, &job->modes) == 0)
+            job->has_modes = 1;
+        tcsetattr(STDIN_FILENO, TCSADRAIN, &shell_modes);
+    }
+    foreground_group = 0;
+    if (finished(job)) discard_job(job);
+}
 
-					if (l->seq[i][1] == NULL) {
-						/* cd sans argument → aller dans HOME */
-						char *home = getenv("HOME");
-						if (home != NULL)
-							chdir(home);
-					} else {
-						if (chdir(l->seq[i][1]) < 0)
-							perror("cd");
-					}
+static int job_index(char **args)
+{
+    char *end, *id;
+    long number;
+    if (!args[1] || args[2]) {
+        fprintf(stderr, "%s: usage: %s <job> (exemple: %s %%1)\n", args[0], args[0], args[0]);
+        return -1;
+    }
+    id = args[1];
+    if (*id == '%') id++;
+    for (char *c = id; *c; c++) {
+        if (*c < '0' || *c > '9') {
+            fprintf(stderr, "%s: numero de job invalide\n", args[0]);
+            return -1;
+        }
+    }
+    errno = 0;
+    number = strtol(id, &end, 10);
+    if (!*id || *end || errno || number < 1 || number > MAXJOBS) {
+        fprintf(stderr, "%s: numero de job invalide\n", args[0]);
+        return -1;
+    }
+    if (!job_table[number - 1].pgid) {
+        fprintf(stderr, "%s: job inexistant: %ld\n", args[0], number);
+        return -1;
+    }
+    return (int)number - 1;
+}
 
-					continue;
-				}
-					//on cree un processus fils pour chaque commande de la sequence
-					pid_t pid1 = Fork();
-					if(pid1 == 0){
-						//on traite les permission de fichier d'entrée
-							if(l->in!=NULL){
-							int fd0 = open(l->in, O_RDONLY, 0);
-							if(fd0 < 0){
-								fprintf(stderr, "%s: permission denied\n", l->in);
-								exit(1);
-								}
-								Dup2(fd0, 0);
-								Close(fd0);
-								
-							}
-						//si c'est la premier commande de la sequence et qu'il y a une commande suivante
-						if(prev_fd == -1 && l->seq[i+1] != NULL){
-							
-							//on ecrit dans fd[1] du tube pour la prochaine commande
-							Dup2(fd[1],1);
-							Close(fd[0]);
-							Close(fd[1]);
-						}
-						//si c'est une commande intermédiaire de la sequence
-						else if(prev_fd !=-1 && l->seq[i+1]!=NULL){
-							//on lit dans prev_fd du tube de la commande précédente
-							Dup2(prev_fd, 0);
-							Close(prev_fd);
-							//on ecrit dans fd[1] du tube pour la prochaine commande
-							Dup2(fd[1], 1);
-							Close(fd[0]);
-							Close(fd[1]);
-						}
-						//si c'est la dernière commande de la sequence
-						else if(l->seq[i+1] == NULL){
-							//on lit dans prev_fd du tube de la commande précédente
-							if(prev_fd != -1){
-								dup2(prev_fd, 0);
-								close(prev_fd);
-							}
-							//on traite les permission de fichier de sortie
-							if(l->out != NULL){
-								int fd1 = open(l->out, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-								if(fd1 < 0){
-									perror(l->out);
-									exit(1);
-								}
-								dup2(fd1, 1);
-								close(fd1);
-							}
-						}
+static int is_builtin(const char *name)
+{
+    return !strcmp(name, "fg") || !strcmp(name, "bg") || !strcmp(name, "jobs") ||
+           !strcmp(name, "cd") || !strcmp(name, "quit") || !strcmp(name, "kill");
+}
 
-						//on execute la commande
-						execvp(l->seq[i][0], l->seq[i]);
-						if(l->background){
-							stat = BG;
-						}else{
-							stat = FG;
-						}
-						
+static void shutdown_jobs(void)
+{
+    for (int j = 0; j < MAXJOBS; j++) {
+        if (job_table[j].pgid) {
+            kill(-job_table[j].pgid, SIGHUP);
+            kill(-job_table[j].pgid, SIGCONT);
+            discard_job(&job_table[j]);
+        }
+    }
+}
 
-						fprintf(stderr, "%s: command not found\n", l->seq[i][0]);
-						exit(1);
-				}else{
-					
-					//dans le pere 
-					if (l->seq[i+1] != NULL) {
+static void builtin(char **args, const sigset_t *previous)
+{
+    if (!strcmp(args[0], "quit")) {
+        shutdown_jobs();
+        exit(0);
+    }
+    if (!strcmp(args[0], "cd")) {
+        const char *path = args[1] ? args[1] : getenv("HOME");
+        if (args[1] && args[2]) fprintf(stderr, "cd: trop d'arguments\n");
+        else if (!path) fprintf(stderr, "cd: HOME non defini\n");
+        else if (chdir(path) < 0) perror("cd");
+        return;
+    }
+    if (!strcmp(args[0], "jobs")) {
+        for (int j = 0; j < MAXJOBS; j++) {
+            struct job *job = &job_table[j];
+            if (job->pgid)
+                printf("[%d]: PID=%ld (%s): %s\n", j + 1, (long)job->pgid,
+                       stopped(job) ? "Stopped" : "Background", job->command);
+        }
+        return;
+    }
+    int index = job_index(args);
+    if (index < 0) return;
+    struct job *job = &job_table[index];
+    if (!strcmp(args[0], "kill")) {
+        if (kill(-job->pgid, SIGTERM) < 0) perror("kill");
+        else kill(-job->pgid, SIGCONT);
+        return;
+    }
+    int foreground = !strcmp(args[0], "fg");
+    if (foreground) {
+        foreground_group = job->pgid;
+        if (interactive) {
+            if (tcsetpgrp(STDIN_FILENO, job->pgid) < 0) {
+                perror("fg"); foreground_group = 0; return;
+            }
+            if (job->has_modes) tcsetattr(STDIN_FILENO, TCSADRAIN, &job->modes);
+        }
+    }
+    if (kill(-job->pgid, SIGCONT) < 0) {
+        perror(args[0]);
+        if (foreground && interactive) {
+            tcsetpgrp(STDIN_FILENO, shell_group);
+            tcsetattr(STDIN_FILENO, TCSADRAIN, &shell_modes);
+        }
+        foreground_group = 0;
+        return;
+    }
+    for (size_t p = 0; p < job->count; p++) job->processes[p].stopped = 0;
+    if (foreground) wait_foreground(job, previous);
+    else printf("[%d] %ld\n", index + 1, (long)job->pgid);
+}
 
-						if (prev_fd != -1)
-							close(prev_fd);
+static void redirect_file(const char *path, int output)
+{
+    if (!path) return;
+    int fd = open(path, output ? O_WRONLY | O_CREAT | O_TRUNC : O_RDONLY, 0644);
+    if (fd < 0 || dup2(fd, output ? STDOUT_FILENO : STDIN_FILENO) < 0) {
+        perror(path); _exit(1);
+    }
+    if (fd > STDERR_FILENO) close(fd);
+}
 
-						close(fd[1]);      // on ferme l’écriture côté parent
-						prev_fd = fd[0];   // on garde lecture pour prochaine commande
-					}
+static void launch(struct cmdline *line, const sigset_t *previous)
+{
+    int index, previous_fd = -1, gate[2];
+    size_t count = 0;
+    while (line->seq[count]) count++;
+    for (index = 0; index < MAXJOBS && job_table[index].pgid; index++);
+    if (index == MAXJOBS) { fprintf(stderr, "shell: table des jobs pleine\n"); return; }
+    struct job *job = &job_table[index];
+    job->processes = calloc(count, sizeof(*job->processes));
+    job->command = strdup(line->seq[0][0]);
+    if (!job->processes || !job->command) { perror("allocation"); discard_job(job); return; }
+    /* Children wait for EOF on this pipe until their group owns the terminal.
+     * This also keeps the group leader alive while the pipeline is assembled. */
+    if (pipe(gate) < 0) { perror("pipe"); discard_job(job); return; }
+    fflush(NULL);
+    for (size_t p = 0; p < count; p++) {
+        int fd[2] = {-1, -1};
+        if (p + 1 < count && pipe(fd) < 0) { perror("pipe"); goto fail; }
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            if (fd[0] >= 0) { close(fd[0]); close(fd[1]); }
+            goto fail;
+        }
+        if (pid == 0) {
+            if (setpgid(0, job->pgid) < 0) _exit(1);
+            install_handler(SIGCHLD, SIG_DFL);
+            install_handler(SIGINT, SIG_DFL);
+            install_handler(SIGTSTP, SIG_DFL);
+            install_handler(SIGQUIT, SIG_DFL);
+            install_handler(SIGTTIN, SIG_DFL);
+            install_handler(SIGTTOU, SIG_DFL);
+            close(gate[1]);
+            char dummy;
+            while (read(gate[0], &dummy, 1) < 0 && errno == EINTR);
+            close(gate[0]);
+            if (previous_fd >= 0 && dup2(previous_fd, STDIN_FILENO) < 0) _exit(1);
+            if (fd[1] >= 0 && dup2(fd[1], STDOUT_FILENO) < 0) _exit(1);
+            if (previous_fd >= 0) close(previous_fd);
+            if (fd[0] >= 0) { close(fd[0]); close(fd[1]); }
+            if (p == 0) redirect_file(line->in, 0);
+            if (p + 1 == count) redirect_file(line->out, 1);
+            sigprocmask(SIG_SETMASK, previous, NULL);
+            execvp(line->seq[p][0], line->seq[p]);
+            perror(line->seq[p][0]);
+            _exit(127);
+        }
+        if (!job->pgid) job->pgid = pid;
+        job->processes[job->count++].pid = pid;
+        if (setpgid(pid, job->pgid) < 0) {
+            perror("setpgid");
+            if (fd[0] >= 0) { close(fd[0]); close(fd[1]); }
+            goto fail;
+        }
+        if (previous_fd >= 0) close(previous_fd);
+        if (fd[1] >= 0) close(fd[1]);
+        previous_fd = fd[0];
+    }
+    if (previous_fd >= 0) close(previous_fd);
+    close(gate[0]);
+    if (!line->background) {
+        foreground_group = job->pgid;
+        if (interactive && tcsetpgrp(STDIN_FILENO, job->pgid) < 0) perror("tcsetpgrp");
+    }
+    close(gate[1]);
+    if (line->background) printf("[%d] %ld\n", index + 1, (long)job->pgid);
+    else wait_foreground(job, previous);
+    return;
+fail:
+    if (previous_fd >= 0) close(previous_fd);
+    /* Kill every recorded PID too: a failed setpgid may leave one outside the group. */
+    for (size_t p = 0; p < job->count; p++) kill(job->processes[p].pid, SIGKILL);
+    close(gate[0]); close(gate[1]);
+    for (size_t p = 0; p < job->count; p++)
+        while (waitpid(job->processes[p].pid, NULL, 0) < 0 && errno == EINTR);
+    discard_job(job);
+}
 
-
-					sigset_t mask, prev;
-					Sigemptyset(&mask);
-					Sigaddset(&mask, SIGCHLD);
-					Sigprocmask(SIG_BLOCK, &mask, &prev);
-
-					//on ajoute le job dans le tableau des jobs
-					ajouter_job(&tab_jobs, premierecase(&tab_jobs), pid1, l->seq[i][0], stat);
-
-					Sigprocmask(SIG_SETMASK, &prev, NULL);
-				}
-				
-				
-
-			}
-			//pour bien gere les ordre dans le forground
-			if (!l->background) {
-				int status;
-				for (int k = 0; l->seq[k] != NULL; k++)
-					wait(&status);
-			}
-			
-			
-	
-	}
+int main(void)
+{
+    interactive = isatty(STDIN_FILENO);
+    shell_group = getpgrp();
+    if (interactive) {
+        while (tcgetpgrp(STDIN_FILENO) != shell_group) kill(-shell_group, SIGTTIN);
+        install_handler(SIGTTIN, SIG_IGN);
+        install_handler(SIGTTOU, SIG_IGN);
+        if (setpgid(0, 0) < 0 && errno != EPERM) { perror("setpgid"); return 1; }
+        shell_group = getpgrp();
+        if (tcsetpgrp(STDIN_FILENO, shell_group) < 0 ||
+            tcgetattr(STDIN_FILENO, &shell_modes) < 0) { perror("terminal"); return 1; }
+    }
+    sigemptyset(&child_mask);
+    sigaddset(&child_mask, SIGCHLD);
+    install_handler(SIGCHLD, child_changed);
+    install_handler(SIGINT, forward_signal);
+    install_handler(SIGTSTP, forward_signal);
+    install_handler(SIGQUIT, SIG_IGN);
+    for (;;) {
+        sigset_t previous;
+        sigprocmask(SIG_BLOCK, &child_mask, &previous);
+        reap_jobs();
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+        printf("shell> "); fflush(stdout);
+        struct cmdline *line = readcmd();
+        sigprocmask(SIG_BLOCK, &child_mask, &previous);
+        reap_jobs();
+        if (!line) { shutdown_jobs(); printf("exit\n"); return 0; }
+        if (line->err) fprintf(stderr, "error: %s\n", line->err);
+        else if (line->seq && line->seq[0]) {
+            int has_builtin = 0;
+            for (size_t p = 0; line->seq[p]; p++) has_builtin |= is_builtin(line->seq[p][0]);
+            if (has_builtin && (line->seq[1] || line->in || line->out || line->background))
+                fprintf(stderr, "shell: commandes internes sans pipe, redirection ou & uniquement\n");
+            else if (has_builtin) builtin(line->seq[0], &previous);
+            else launch(line, &previous);
+        }
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+    }
 }
