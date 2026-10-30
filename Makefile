@@ -1,4 +1,4 @@
-.PHONY: all, clean
+.PHONY: all clean test
 
 # Disable implicit rules
 .SUFFIXES:
@@ -27,3 +27,7 @@ all: shell
 clean:
 	rm -f shell *.o
 
+
+
+test: shell
+	python3 tests/test_job_control.py
